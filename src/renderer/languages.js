@@ -1,5 +1,5 @@
 const LANGUAGE_DATA = [
-    { code: "auto", name: "Auto (System Default)" },
+    { code: "auto", name: "Auto (IP Based)" },
     { code: "en-US", name: "English (US)" },
     { code: "en-CA", name: "English (Canada)" },
     { code: "fr-CA", name: "Français (Canada)" },

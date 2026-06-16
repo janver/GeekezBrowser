@@ -164,19 +164,20 @@ function parseBrowserVersionPreset(preset) {
 const AUTO_TIMEZONE_LABEL = 'Auto (IP Based)';
 const LEGACY_AUTO_TIMEZONE_LABEL = 'Auto (No Change)';
 const AUTO_CITY = { name: 'Auto (IP Based)', lat: null, lng: null };
+const AUTO_LANGUAGE_LABEL = 'Auto (IP Based)';
 
 const timezoneSearch = ref(AUTO_TIMEZONE_LABEL);
 const showTimezoneList = ref(false);
 const citySearch = ref('Auto (IP Based)');
 const showCityList = ref(false);
-const languageSearch = ref('Auto (System Default)');
+const languageSearch = ref(AUTO_LANGUAGE_LABEL);
 const showLanguageList = ref(false);
 
 // Lists (Accessing from global window if not imported)
 const allTimezones = window.TIMEZONES || [];
 const allCities = [AUTO_CITY, ...(window.CITY_DATA || [])];
 const allLanguages = window.LANGUAGE_DATA || [
-  { name: 'Auto (System Default)', code: 'auto' },
+  { name: AUTO_LANGUAGE_LABEL, code: 'auto' },
   { name: 'English (US)', code: 'en-US' }
 ];
 
@@ -192,7 +193,11 @@ const filteredCities = computed(() => {
 
 const filteredLanguages = computed(() => {
   const s = languageSearch.value.toLowerCase();
-  return allLanguages.filter(l => l.name.toLowerCase().includes(s) || l.code.toLowerCase().includes(s));
+  return allLanguages.filter(l =>
+    l.name.toLowerCase().includes(s) ||
+    l.code.toLowerCase().includes(s) ||
+    (l.code === 'auto' && 'auto (system default)'.includes(s))
+  );
 });
 
 function selectTimezone(tz) {
@@ -217,7 +222,7 @@ function selectCity(city) {
 
 function selectLanguage(lang) {
   form.language = lang.code;
-  languageSearch.value = lang.name;
+  languageSearch.value = lang.code === 'auto' ? AUTO_LANGUAGE_LABEL : lang.name;
   showLanguageList.value = false;
 }
 
@@ -251,7 +256,7 @@ watch(() => uiStore.addModalVisible, async (newVal) => {
     });
     timezoneSearch.value = AUTO_TIMEZONE_LABEL;
     citySearch.value = 'Auto (IP Based)';
-    languageSearch.value = 'Auto (System Default)';
+    languageSearch.value = AUTO_LANGUAGE_LABEL;
     try {
       settings.value = await window.electronAPI.getSettings();
       showUaWebglModify.value = !!settings.value?.enableUaWebglModify;

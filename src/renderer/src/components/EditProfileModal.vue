@@ -175,18 +175,19 @@ function toBrowserVersionPreset(uaMode, browserType, browserMajorVersion) {
 const AUTO_TIMEZONE_LABEL = 'Auto (IP Based)';
 const LEGACY_AUTO_TIMEZONE_LABEL = 'Auto (No Change)';
 const AUTO_CITY = { name: 'Auto (IP Based)', lat: null, lng: null };
+const AUTO_LANGUAGE_LABEL = 'Auto (IP Based)';
 
 const timezoneSearch = ref(AUTO_TIMEZONE_LABEL);
 const showTimezoneList = ref(false);
 const citySearch = ref('Auto (IP Based)');
 const showCityList = ref(false);
-const languageSearch = ref('Auto (System Default)');
+const languageSearch = ref(AUTO_LANGUAGE_LABEL);
 const showLanguageList = ref(false);
 
 const allTimezones = window.TIMEZONES || [];
 const allCities = [AUTO_CITY, ...(window.CITY_DATA || [])];
 const allLanguages = window.LANGUAGE_DATA || [
-  { name: 'Auto (System Default)', code: 'auto' },
+  { name: AUTO_LANGUAGE_LABEL, code: 'auto' },
   { name: 'English (US)', code: 'en-US' }
 ];
 
@@ -201,7 +202,11 @@ const filteredCities = computed(() => {
 });
 const filteredLanguages = computed(() => {
   const s = languageSearch.value.toLowerCase();
-  return allLanguages.filter(l => l.name.toLowerCase().includes(s) || l.code.toLowerCase().includes(s));
+  return allLanguages.filter(l =>
+    l.name.toLowerCase().includes(s) ||
+    l.code.toLowerCase().includes(s) ||
+    (l.code === 'auto' && 'auto (system default)'.includes(s))
+  );
 });
 
 // Backfill logic
@@ -238,7 +243,7 @@ watch(() => uiStore.editModalVisible, async (visible) => {
     // Language
     form.language = fp.language || 'auto';
     const langObj = allLanguages.find(l => l.code === form.language);
-    languageSearch.value = langObj ? langObj.name : 'Auto (System Default)';
+    languageSearch.value = form.language === 'auto' ? AUTO_LANGUAGE_LABEL : (langObj ? langObj.name : AUTO_LANGUAGE_LABEL);
   }
 });
 
@@ -264,7 +269,7 @@ function selectCity(city) {
 
 function selectLanguage(lang) {
   form.language = lang.code;
-  languageSearch.value = lang.name;
+  languageSearch.value = lang.code === 'auto' ? AUTO_LANGUAGE_LABEL : lang.name;
   showLanguageList.value = false;
 }
 

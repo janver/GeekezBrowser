@@ -153,6 +153,7 @@ const EXTENSION_STORE_CATALOG = [
 
 let activeProcesses = {};
 let launchingProfiles = new Set();
+const runtimeProfileLanguageStates = new Map();
 let apiServer = null;
 let apiServerRunning = false;
 let mainWindow = null; // Global reference for API-to-UI communication
@@ -434,13 +435,34 @@ const INTERNAL_API_PORT = 12139;
 function createInternalApiServer() {
     const server = http.createServer(async (req, res) => {
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
         res.setHeader('Content-Type', 'application/json');
 
         if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
         const url = new URL(req.url, `http://localhost:${INTERNAL_API_PORT}`);
+
+        if (req.method === 'GET' && url.pathname === '/api/runtime/language') {
+            const profileId = String(url.searchParams.get('profileId') || '').trim();
+            if (!profileId) {
+                res.writeHead(400);
+                return res.end(JSON.stringify({ success: false, error: 'profileId required' }));
+            }
+
+            const state = getProfileRuntimeLanguageState(profileId);
+            res.writeHead(200);
+            return res.end(JSON.stringify({
+                success: true,
+                profileId,
+                enabled: !!state.enabled,
+                language: state.language || '',
+                languages: state.languages || [],
+                acceptLanguage: state.acceptLanguageHeader || '',
+                acceptLanguageHeader: state.acceptLanguageHeader || '',
+                updatedAt: state.updatedAt || 0
+            }));
+        }
 
         if (req.method === 'POST' && url.pathname === '/api/passwords/sync') {
             let body = await new Promise(resolve => {
@@ -1175,6 +1197,161 @@ function isAutoIpBasedCityValue(value) {
         normalized === '自动 (基于 ip)';
 }
 
+function isAutoLanguageValue(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return !normalized ||
+        normalized === 'auto' ||
+        normalized === 'auto (ip based)' ||
+        normalized === 'auto (ip base)' ||
+        normalized === 'auto (system default)' ||
+        normalized === '自动 (基于ip)' ||
+        normalized === '自动 (基于 ip)';
+}
+
+function canonicalizeLocale(value) {
+    const raw = String(value || '').trim();
+    if (!raw || isAutoLanguageValue(raw)) return '';
+    try {
+        const locales = Intl.getCanonicalLocales(raw);
+        return locales[0] || '';
+    } catch (e) {
+        return '';
+    }
+}
+
+function normalizeLanguageList(language, languages) {
+    const result = [];
+    const push = (value) => {
+        const locale = canonicalizeLocale(value);
+        if (locale && !result.includes(locale)) result.push(locale);
+    };
+
+    if (Array.isArray(languages)) {
+        languages.forEach(push);
+    }
+    push(language);
+
+    const primary = result[0] && result[0].includes('-') ? result[0].split('-')[0] : '';
+    if (primary) push(primary);
+    return result;
+}
+
+function buildAcceptLanguageHeader(language, languages) {
+    const list = normalizeLanguageList(language, languages);
+    if (list.length === 0) return '';
+    return list
+        .slice(0, 4)
+        .map((lang, index) => {
+            if (index === 0) return lang;
+            const q = Math.max(0.5, 1 - (index * 0.1)).toFixed(1);
+            return `${lang};q=${q}`;
+        })
+        .join(',');
+}
+
+function buildRuntimeLanguageState(fingerprint = {}) {
+    const language = canonicalizeLocale(fingerprint?.language);
+    if (!language) {
+        return {
+            enabled: false,
+            language: '',
+            languages: [],
+            acceptLanguageHeader: ''
+        };
+    }
+
+    const languages = normalizeLanguageList(language, fingerprint?.languages);
+    return {
+        enabled: true,
+        language,
+        languages,
+        acceptLanguageHeader: buildAcceptLanguageHeader(language, languages)
+    };
+}
+
+function setProfileRuntimeLanguageState(profileId, fingerprint = {}) {
+    if (!profileId) return buildRuntimeLanguageState(fingerprint);
+    const state = {
+        ...buildRuntimeLanguageState(fingerprint),
+        updatedAt: Date.now()
+    };
+    runtimeProfileLanguageStates.set(String(profileId), state);
+    return state;
+}
+
+function getProfileRuntimeLanguageState(profileId) {
+    return runtimeProfileLanguageStates.get(String(profileId || '')) || {
+        enabled: false,
+        language: '',
+        languages: [],
+        acceptLanguageHeader: '',
+        updatedAt: 0
+    };
+}
+
+function clearProfileRuntimeLanguageState(profileId) {
+    if (profileId) runtimeProfileLanguageStates.delete(String(profileId));
+}
+
+const IP_COUNTRY_LANGUAGE_MAP = {
+    US: 'en-US',
+    CA: 'en-CA',
+    GB: 'en-GB',
+    IE: 'en-IE',
+    AU: 'en-AU',
+    NZ: 'en-NZ',
+    ZA: 'en-ZA',
+    IN: 'en-IN',
+    PH: 'fil-PH',
+    SG: 'en-SG',
+    CN: 'zh-CN',
+    HK: 'zh-HK',
+    MO: 'zh-HK',
+    TW: 'zh-TW',
+    JP: 'ja-JP',
+    KR: 'ko-KR',
+    TH: 'th-TH',
+    VN: 'vi-VN',
+    ID: 'id-ID',
+    MY: 'ms-MY',
+    FR: 'fr-FR',
+    DE: 'de-DE',
+    IT: 'it-IT',
+    ES: 'es-ES',
+    PT: 'pt-PT',
+    NL: 'nl-NL',
+    BE: 'nl-BE',
+    CH: 'de-CH',
+    AT: 'de-AT',
+    SE: 'sv-SE',
+    NO: 'no-NO',
+    DK: 'da-DK',
+    FI: 'fi-FI',
+    PL: 'pl-PL',
+    CZ: 'cs-CZ',
+    HU: 'hu-HU',
+    RO: 'ro-RO',
+    GR: 'el-GR',
+    TR: 'tr-TR',
+    RU: 'ru-RU',
+    UA: 'uk-UA',
+    MX: 'es-MX',
+    AR: 'es-AR',
+    CL: 'es-CL',
+    CO: 'es-CO',
+    PE: 'es-PE',
+    BR: 'pt-BR',
+    SA: 'ar-SA',
+    AE: 'ar-AE',
+    IL: 'he-IL'
+};
+
+function resolveIpLanguage(country) {
+    const code = String(country || '').trim().toUpperCase();
+    const mapped = IP_COUNTRY_LANGUAGE_MAP[code] || 'en-US';
+    return canonicalizeLocale(mapped) || 'en-US';
+}
+
 function hasValidGeolocation(geo) {
     return !!geo &&
         typeof geo.latitude === 'number' &&
@@ -1186,10 +1363,12 @@ function hasValidGeolocation(geo) {
 function getAutoIpBasePolicy(fingerprint = {}) {
     const timezone = isAutoTimezoneValue(fingerprint.timezone);
     const location = !hasValidGeolocation(fingerprint.geolocation) && isAutoIpBasedCityValue(fingerprint.city);
+    const language = isAutoLanguageValue(fingerprint.language);
     return {
         timezone,
         location,
-        enabled: timezone || location
+        language,
+        enabled: timezone || location || language
     };
 }
 
@@ -1238,6 +1417,9 @@ function parseIpInfoSnapshot(payload = {}) {
     const longitude = Number(lngRaw);
     const hasGeo = Number.isFinite(latitude) && Number.isFinite(longitude);
     const timezone = isValidTimezoneId(payload.timezone) ? String(payload.timezone).trim() : null;
+    const country = String(payload.country || '').trim().toUpperCase();
+    const language = resolveIpLanguage(country);
+    const languages = normalizeLanguageList(language);
 
     return {
         ip,
@@ -1248,7 +1430,9 @@ function parseIpInfoSnapshot(payload = {}) {
         timezone,
         city: String(payload.city || '').trim(),
         region: String(payload.region || '').trim(),
-        country: String(payload.country || '').trim(),
+        country,
+        language,
+        languages,
         org: String(payload.org || '').trim(),
         source: 'ipinfo.io',
         updatedAt: Date.now()
@@ -1309,6 +1493,7 @@ function isAutoIpBaseSourceUsable(source, policy) {
         if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false;
     }
     if (policy.timezone && !isValidTimezoneId(source.timezone)) return false;
+    if (policy.language && !canonicalizeLocale(source.language)) return false;
     return true;
 }
 
@@ -1326,6 +1511,11 @@ function buildAutoIpBaseFingerprint(baseFingerprint = {}, source, policy) {
     }
     if (policy.timezone && isValidTimezoneId(source.timezone)) {
         nextFingerprint.timezone = source.timezone;
+    }
+    if (policy.language) {
+        const language = canonicalizeLocale(source.language);
+        nextFingerprint.language = language;
+        nextFingerprint.languages = normalizeLanguageList(language, source.languages);
     }
     return nextFingerprint;
 }
@@ -1474,14 +1664,19 @@ function normalizeFingerprintOptions(data = {}) {
         firstDefined(data.resH, inputFp.resH, inputFp.screen?.height)
     );
 
+    const rawLanguage = firstDefined(data.language, inputFp.language);
+    const normalizedLanguage = isAutoLanguageValue(rawLanguage)
+        ? 'auto'
+        : (canonicalizeLocale(rawLanguage) || rawLanguage);
+
     const normalized = {
         ...inputFp,
         uaMode: firstDefined(data.uaMode, inputFp.uaMode),
         timezone: firstDefined(data.timezone, inputFp.timezone),
         city: firstDefined(data.city, inputFp.city),
         geolocation: firstDefined(data.geolocation, inputFp.geolocation),
-        language: firstDefined(data.language, inputFp.language),
-        languages: firstDefined(data.languages, inputFp.languages),
+        language: normalizedLanguage,
+        languages: normalizedLanguage === 'auto' ? [] : firstDefined(data.languages, inputFp.languages),
         platform: firstDefined(data.platform, inputFp.platform),
         hardwareConcurrency: firstDefined(data.hardwareConcurrency, inputFp.hardwareConcurrency),
         deviceMemory: firstDefined(data.deviceMemory, inputFp.deviceMemory),
@@ -2147,6 +2342,7 @@ async function stopRunningProfile(profileId, options = {}) {
     const proc = activeProcesses[profileId];
     if (!proc) return false;
 
+    clearProfileRuntimeLanguageState(profileId);
     await forceKill(proc.xrayPid);
     try { await proc.browser.close(); } catch (e) { }
     if (proc.logFd !== undefined) {
@@ -2543,8 +2739,8 @@ async function generateExtension(profilePath, fingerprint, profileName, watermar
         name: "GeekEZ Guard",
         version: "1.1.0",
         description: "Privacy & Password Protection",
-        permissions: ["storage", "activeTab"],
-        host_permissions: ["http://127.0.0.1/*", "http://localhost/*"],
+        permissions: ["storage", "activeTab", "declarativeNetRequest"],
+        host_permissions: ["<all_urls>", "http://127.0.0.1/*", "http://localhost/*"],
         background: { service_worker: "background.js" },
         content_scripts: [
             {
@@ -2564,26 +2760,97 @@ async function generateExtension(profilePath, fingerprint, profileName, watermar
                 match_about_blank: true,
                 match_origin_as_fallback: true,
                 world: "ISOLATED"
+            },
+            {
+                matches: ["<all_urls>"],
+                js: ["runtime.js"],
+                run_at: "document_start",
+                all_frames: false,
+                match_about_blank: true,
+                match_origin_as_fallback: true,
+                world: "ISOLATED"
             }
         ],
         action: { default_popup: "popup.html" }
     };
     const style = watermarkStyle || 'enhanced';
+    const initialLanguageState = buildRuntimeLanguageState(fingerprint);
     const geoScriptContent = getGeolocationScript(fingerprint);
     const scriptContent = getInjectScript(fingerprint, profileName, style);
     await fs.writeJson(path.join(extDir, 'manifest.json'), manifest);
     await fs.writeFile(path.join(extDir, 'geo.js'), geoScriptContent);
     await fs.writeFile(path.join(extDir, 'content.js'), scriptContent);
 
+    const runtimeJs = `
+(function() {
+    'use strict';
+    if (!chrome || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') return;
+
+    let fastPollCount = 0;
+    let fastPollTimer = null;
+    let slowPollTimer = null;
+
+    function syncRuntimeLanguage() {
+        try {
+            chrome.runtime.sendMessage({ type: 'SYNC_RUNTIME_LANGUAGE' }, () => {
+                try { void chrome.runtime.lastError; } catch (e) { }
+            });
+        } catch (e) { }
+    }
+
+    function startSyncLoop() {
+        syncRuntimeLanguage();
+        if (fastPollTimer) clearInterval(fastPollTimer);
+        if (slowPollTimer) clearInterval(slowPollTimer);
+        fastPollCount = 0;
+        fastPollTimer = setInterval(() => {
+            fastPollCount += 1;
+            syncRuntimeLanguage();
+            if (fastPollCount >= 90) {
+                clearInterval(fastPollTimer);
+                fastPollTimer = null;
+                slowPollTimer = setInterval(syncRuntimeLanguage, 30000);
+            }
+        }, 1000);
+    }
+
+    startSyncLoop();
+    window.addEventListener('pageshow', syncRuntimeLanguage, { capture: true });
+    document.addEventListener('visibilitychange', syncRuntimeLanguage, { capture: true });
+})();
+`;
+    await fs.writeFile(path.join(extDir, 'runtime.js'), runtimeJs);
+
     // --- background.js ---
     const backgroundJs = `
 const PROFILE_ID = ${JSON.stringify(profileId || '')};
 const API_PORT = ${apiPort};
 const INIT_PASSWORDS = ${JSON.stringify(passwords)};
+const INIT_LANGUAGE_STATE = ${JSON.stringify(initialLanguageState)};
+const LANGUAGE_RULE_ID = 9101;
+const LANGUAGE_RESOURCE_TYPES = [
+    'main_frame',
+    'sub_frame',
+    'stylesheet',
+    'script',
+    'image',
+    'font',
+    'object',
+    'xmlhttprequest',
+    'ping',
+    'csp_report',
+    'media',
+    'websocket',
+    'other'
+];
+let lastLanguageStateKey = '';
+let runtimeLanguagePollTimer = null;
+let runtimeLanguagePollCount = 0;
 
 // 初始化密码数据
-chrome.runtime.onInstalled.addListener(() => { initPasswords(); });
-chrome.runtime.onStartup.addListener(() => { initPasswords(); });
+chrome.runtime.onInstalled.addListener(() => { initPasswords(); startRuntimeLanguageSync(); });
+chrome.runtime.onStartup.addListener(() => { initPasswords(); startRuntimeLanguageSync(); });
+startRuntimeLanguageSync();
 
 async function initPasswords() {
     const { geekez_passwords } = await chrome.storage.local.get('geekez_passwords');
@@ -2631,7 +2898,129 @@ function syncToElectron(passwords) {
       .catch(err => console.error('Sync to Electron falied:', err));
 }
 
+function normalizeRuntimeLanguageState(state) {
+    const enabled = !!state && !!state.enabled;
+    const acceptLanguageHeader = String(
+        state?.acceptLanguageHeader ||
+        state?.acceptLanguage ||
+        ''
+    ).trim();
+    const language = String(state?.language || '').trim();
+    const languages = Array.isArray(state?.languages)
+        ? state.languages.map(v => String(v || '').trim()).filter(Boolean)
+        : [];
+
+    if (!enabled || !acceptLanguageHeader || !language) {
+        return {
+            enabled: false,
+            language: '',
+            languages: [],
+            acceptLanguageHeader: '',
+            updatedAt: Number(state?.updatedAt || 0) || 0
+        };
+    }
+
+    return {
+        enabled: true,
+        language,
+        languages,
+        acceptLanguageHeader,
+        updatedAt: Number(state?.updatedAt || 0) || 0
+    };
+}
+
+function getLanguageStateKey(state) {
+    const normalized = normalizeRuntimeLanguageState(state);
+    return [
+        normalized.enabled ? '1' : '0',
+        normalized.language,
+        normalized.acceptLanguageHeader,
+        normalized.languages.join('|'),
+        normalized.updatedAt
+    ].join('::');
+}
+
+async function applyAcceptLanguageRule(state) {
+    const normalized = normalizeRuntimeLanguageState(state);
+    const api = chrome.declarativeNetRequest;
+    if (!api || typeof api.updateDynamicRules !== 'function') return;
+
+    if (!normalized.enabled) {
+        await api.updateDynamicRules({ removeRuleIds: [LANGUAGE_RULE_ID] });
+        return;
+    }
+
+    await api.updateDynamicRules({
+        removeRuleIds: [LANGUAGE_RULE_ID],
+        addRules: [{
+            id: LANGUAGE_RULE_ID,
+            priority: 100,
+            action: {
+                type: 'modifyHeaders',
+                requestHeaders: [{
+                    header: 'accept-language',
+                    operation: 'set',
+                    value: normalized.acceptLanguageHeader
+                }]
+            },
+            condition: {
+                regexFilter: '^https?://',
+                resourceTypes: LANGUAGE_RESOURCE_TYPES
+            }
+        }]
+    });
+}
+
+async function fetchRuntimeLanguageState() {
+    if (!PROFILE_ID) return normalizeRuntimeLanguageState(INIT_LANGUAGE_STATE);
+    const res = await fetch(\`http://127.0.0.1:\${API_PORT}/api/runtime/language?profileId=\${encodeURIComponent(PROFILE_ID)}&_=\${Date.now()}\`, {
+        method: 'GET',
+        cache: 'no-store'
+    });
+    if (!res.ok) throw new Error(\`runtime language HTTP \${res.status}\`);
+    return normalizeRuntimeLanguageState(await res.json());
+}
+
+async function syncRuntimeLanguage() {
+    try {
+        const state = await fetchRuntimeLanguageState();
+        const key = getLanguageStateKey(state);
+        if (key !== lastLanguageStateKey) {
+            await applyAcceptLanguageRule(state);
+            lastLanguageStateKey = key;
+        }
+    } catch (err) {
+        const fallbackKey = getLanguageStateKey(INIT_LANGUAGE_STATE);
+        if (fallbackKey !== lastLanguageStateKey) {
+            try {
+                await applyAcceptLanguageRule(INIT_LANGUAGE_STATE);
+                lastLanguageStateKey = fallbackKey;
+            } catch (e) { }
+        }
+    }
+}
+
+function startRuntimeLanguageSync() {
+    syncRuntimeLanguage();
+    if (runtimeLanguagePollTimer) {
+        clearInterval(runtimeLanguagePollTimer);
+    }
+    runtimeLanguagePollCount = 0;
+    runtimeLanguagePollTimer = setInterval(() => {
+        runtimeLanguagePollCount += 1;
+        syncRuntimeLanguage();
+        if (runtimeLanguagePollCount === 90) {
+            clearInterval(runtimeLanguagePollTimer);
+            runtimeLanguagePollTimer = setInterval(syncRuntimeLanguage, 30000);
+        }
+    }, 1000);
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === 'SYNC_RUNTIME_LANGUAGE') {
+        syncRuntimeLanguage().then(() => sendResponse({ success: true })).catch(err => sendResponse({ success: false, error: err.message }));
+        return true;
+    }
     if (msg.type === 'QUERY_PASSWORDS') {
         getPasswords().then(pws => {
             const matches = pws.filter(p => msg.origin && p.origin === msg.origin);
@@ -4503,10 +4892,12 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
             } catch (e) {
                 await forceKill(proc.xrayPid);
                 delete activeProcesses[profileId];
+                clearProfileRuntimeLanguageState(profileId);
             }
         } else {
             await forceKill(proc.xrayPid);
             delete activeProcesses[profileId];
+            clearProfileRuntimeLanguageState(profileId);
         }
         if (activeProcesses[profileId]) return "环境已唤醒";
     }
@@ -4764,7 +5155,7 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
         );
         // 0. Resolve language override
         const configuredLang = profile.fingerprint?.language;
-        const hasLanguageOverride = typeof configuredLang === 'string' && configuredLang && configuredLang !== 'auto';
+        const hasLanguageOverride = typeof configuredLang === 'string' && configuredLang && !isAutoLanguageValue(configuredLang);
         const localeFromSystem = (() => {
             try {
                 const rawLocale = app.getLocale ? app.getLocale() : '';
@@ -4777,7 +5168,7 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
                 return 'en-US';
             }
         })();
-        const targetLang = hasLanguageOverride ? configuredLang : localeFromSystem;
+        const targetLang = hasLanguageOverride ? (canonicalizeLocale(configuredLang) || configuredLang) : localeFromSystem;
 
         // Update in-memory profile only for explicit language override.
         if (hasLanguageOverride) {
@@ -4940,14 +5331,16 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
             { step: 9, profileName: progressProfileName }
         );
 
-        const shortLang = targetLang.includes('-') ? targetLang.split('-')[0] : targetLang;
-        const acceptLanguageHeader = shortLang && shortLang !== targetLang
-            ? `${targetLang},${shortLang};q=0.9`
-            : targetLang;
         let runtimeFingerprint = profile.fingerprint;
+        setProfileRuntimeLanguageState(profileId, runtimeFingerprint);
+        const getRuntimeLanguageState = () => {
+            return buildRuntimeLanguageState(runtimeFingerprint);
+        };
         let geolocationScript = getGeolocationScript(runtimeFingerprint);
         let fingerprintInjectScript = getInjectScript(runtimeFingerprint, profile.name, style);
         const watermarkInjectScript = getWatermarkScript(profile.name, style);
+        let earlyAttachSession = null;
+        const earlyAttachSessions = new Set();
         const enableWebglOverride = !!(
             profile.fingerprint?.webglProfile !== 'none' &&
             profile.fingerprint?.webgl &&
@@ -5053,6 +5446,149 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
         })();
 
         // Keep network headers, Intl locale and runtime fingerprint hooks aligned with profile settings.
+        const applySessionOverrides = async (session, options = {}) => {
+            if (!session) return;
+            const { includeScripts = false, resume = false } = options;
+
+            try {
+                if (includeScripts) {
+                    try {
+                        await session.send('Page.enable');
+                        await session.send('Page.addScriptToEvaluateOnNewDocument', { source: geolocationScript });
+                        await session.send('Page.addScriptToEvaluateOnNewDocument', { source: fingerprintInjectScript });
+                        await session.send('Page.addScriptToEvaluateOnNewDocument', { source: watermarkInjectScript });
+                        await session.send('Page.addScriptToEvaluateOnNewDocument', { source: webglOverrideScript });
+                    } catch (e) { }
+                }
+
+                try { await session.send('Network.enable'); } catch (e) { }
+
+                const runtimeLanguage = getRuntimeLanguageState();
+                if (runtimeLanguage.enabled) {
+                    try {
+                        await session.send('Network.setExtraHTTPHeaders', {
+                            headers: {
+                                'Accept-Language': runtimeLanguage.acceptLanguageHeader
+                            }
+                        });
+                    } catch (e) { }
+
+                    try {
+                        await session.send('Emulation.setLocaleOverride', { locale: runtimeLanguage.language });
+                    } catch (e) { }
+                }
+
+                if (runtimeFingerprint?.timezone && !isAutoTimezoneValue(runtimeFingerprint.timezone)) {
+                    try {
+                        await session.send('Emulation.setTimezoneOverride', { timezoneId: runtimeFingerprint.timezone });
+                    } catch (e) { }
+                }
+
+                if (profile.fingerprint?.userAgent) {
+                    const payload = {
+                        userAgent: profile.fingerprint.userAgent
+                    };
+                    if (runtimeLanguage.enabled) {
+                        payload.acceptLanguage = runtimeLanguage.acceptLanguageHeader;
+                    }
+                    if (profile.fingerprint?.platform) {
+                        payload.platform = profile.fingerprint.platform;
+                    }
+
+                    const metadata = profile.fingerprint?.userAgentMetadata;
+                    if (metadata && typeof metadata === 'object') {
+                        const md = {
+                            mobile: !!metadata.mobile
+                        };
+                        if (Array.isArray(metadata.brands)) md.brands = metadata.brands;
+                        if (Array.isArray(metadata.fullVersionList)) md.fullVersionList = metadata.fullVersionList;
+                        if (metadata.platform) md.platform = metadata.platform;
+                        if (metadata.platformVersion) md.platformVersion = metadata.platformVersion;
+                        if (metadata.architecture) md.architecture = metadata.architecture;
+                        if (metadata.model !== undefined) md.model = metadata.model;
+                        if (metadata.bitness) md.bitness = metadata.bitness;
+                        if (metadata.wow64 !== undefined) md.wow64 = !!metadata.wow64;
+                        if (metadata.uaFullVersion) md.fullVersion = metadata.uaFullVersion;
+                        payload.userAgentMetadata = md;
+                    }
+
+                    await session.send('Network.setUserAgentOverride', payload);
+                }
+            } finally {
+                if (resume) {
+                    try { await session.send('Runtime.runIfWaitingForDebugger'); } catch (e) { }
+                }
+            }
+        };
+
+        const installEarlyTargetOverrides = async () => {
+            try {
+                if (!browser || typeof browser.target !== 'function') return;
+                const browserTarget = browser.target();
+                if (!browserTarget || typeof browserTarget.createCDPSession !== 'function') return;
+
+                earlyAttachSession = await browserTarget.createCDPSession();
+                earlyAttachSession.on('Target.attachedToTarget', async (event = {}) => {
+                    const targetInfo = event.targetInfo || {};
+                    const sessionId = event.sessionId;
+                    if (targetInfo.type !== 'page' || !sessionId) return;
+
+                    let childSession = null;
+                    try {
+                        const connection = typeof earlyAttachSession.connection === 'function'
+                            ? earlyAttachSession.connection()
+                            : null;
+                        childSession = connection && typeof connection.session === 'function'
+                            ? connection.session(sessionId)
+                            : null;
+                        if (!childSession) return;
+
+                        earlyAttachSessions.add(childSession);
+                        await applySessionOverrides(childSession, {
+                            includeScripts: true,
+                            resume: true
+                        });
+                    } catch (err) {
+                        try {
+                            if (childSession) await childSession.send('Runtime.runIfWaitingForDebugger');
+                        } catch (e) { }
+                    }
+                });
+
+                earlyAttachSession.on('Target.detachedFromTarget', (event = {}) => {
+                    const sessionId = event.sessionId;
+                    for (const session of Array.from(earlyAttachSessions)) {
+                        try {
+                            if (typeof session.id === 'function' && session.id() === sessionId) {
+                                earlyAttachSessions.delete(session);
+                            }
+                        } catch (e) { }
+                    }
+                });
+
+                await earlyAttachSession.send('Target.setAutoAttach', {
+                    autoAttach: true,
+                    waitForDebuggerOnStart: true,
+                    flatten: true,
+                    filter: [{ type: 'page' }]
+                });
+            } catch (err) {
+                console.warn('Early target override failed:', err?.message || err);
+            }
+        };
+
+        const refreshEarlyTargetOverrides = async () => {
+            for (const session of Array.from(earlyAttachSessions)) {
+                try {
+                    if (session?.detached) {
+                        earlyAttachSessions.delete(session);
+                        continue;
+                    }
+                    await applySessionOverrides(session, { includeScripts: true });
+                } catch (e) { }
+            }
+        };
+
         const applyPageOverrides = async (page) => {
             if (!page) return;
             try {
@@ -5083,62 +5619,7 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
                 } catch (e) { }
 
                 const session = await page.createCDPSession();
-                try {
-                    await session.send('Page.enable');
-                    await session.send('Page.addScriptToEvaluateOnNewDocument', { source: webglOverrideScript });
-                } catch (e) { }
-                try { await session.send('Network.enable'); } catch (e) { }
-
-                if (hasLanguageOverride) {
-                    try {
-                        await session.send('Network.setExtraHTTPHeaders', {
-                            headers: {
-                                'Accept-Language': acceptLanguageHeader
-                            }
-                        });
-                    } catch (e) { }
-
-                    try {
-                        await session.send('Emulation.setLocaleOverride', { locale: targetLang });
-                    } catch (e) { }
-                }
-
-                if (runtimeFingerprint?.timezone && !isAutoTimezoneValue(runtimeFingerprint.timezone)) {
-                    try {
-                        await session.send('Emulation.setTimezoneOverride', { timezoneId: runtimeFingerprint.timezone });
-                    } catch (e) { }
-                }
-
-                if (profile.fingerprint?.userAgent) {
-                    const payload = {
-                        userAgent: profile.fingerprint.userAgent
-                    };
-                    if (hasLanguageOverride) {
-                        payload.acceptLanguage = targetLang;
-                    }
-                    if (profile.fingerprint?.platform) {
-                        payload.platform = profile.fingerprint.platform;
-                    }
-
-                    const metadata = profile.fingerprint?.userAgentMetadata;
-                    if (metadata && typeof metadata === 'object') {
-                        const md = {
-                            mobile: !!metadata.mobile
-                        };
-                        if (Array.isArray(metadata.brands)) md.brands = metadata.brands;
-                        if (Array.isArray(metadata.fullVersionList)) md.fullVersionList = metadata.fullVersionList;
-                        if (metadata.platform) md.platform = metadata.platform;
-                        if (metadata.platformVersion) md.platformVersion = metadata.platformVersion;
-                        if (metadata.architecture) md.architecture = metadata.architecture;
-                        if (metadata.model !== undefined) md.model = metadata.model;
-                        if (metadata.bitness) md.bitness = metadata.bitness;
-                        if (metadata.wow64 !== undefined) md.wow64 = !!metadata.wow64;
-                        if (metadata.uaFullVersion) md.fullVersion = metadata.uaFullVersion;
-                        payload.userAgentMetadata = md;
-                    }
-
-                    await session.send('Network.setUserAgentOverride', payload);
-                }
+                await applySessionOverrides(session, { includeScripts: true });
             } catch (err) {
                 const msg = String(err && err.message ? err.message : '');
                 if (msg.includes('No target with given id found') || msg.includes('Target closed')) {
@@ -5147,6 +5628,8 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
                 console.warn('Page override failed:', msg);
             }
         };
+
+        await installEarlyTargetOverrides();
 
         try {
             const startupPages = await browser.pages();
@@ -5189,6 +5672,8 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
         const handlePageCreated = async (page) => {
             if (!page) return;
 
+            await applyPageOverrides(page);
+
             try {
                 const url = page.url();
                 if (shouldRestoreSession && inBlankCleanupWindow() && isBlankPageUrl(url)) {
@@ -5196,8 +5681,6 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
                     await ensureAtLeastOnePage();
                 }
             } catch (e) { }
-
-            await applyPageOverrides(page);
         };
 
         browser.on('targetcreated', async (target) => {
@@ -5257,10 +5740,12 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
                 if (!resolved || !resolved.fingerprint) return;
 
                 runtimeFingerprint = resolved.fingerprint;
+                setProfileRuntimeLanguageState(profileId, runtimeFingerprint);
                 geolocationScript = getGeolocationScript(runtimeFingerprint);
                 fingerprintInjectScript = getInjectScript(runtimeFingerprint, profile.name, style);
 
                 try {
+                    await refreshEarlyTargetOverrides();
                     const pages = await browser.pages();
                     for (const page of pages) {
                         await applyPageOverrides(page);
@@ -5273,6 +5758,9 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
                 }
                 if (resolved.policy.timezone && isValidTimezoneId(runtimeFingerprint.timezone)) {
                     parts.push(`timezone=${runtimeFingerprint.timezone}`);
+                }
+                if (resolved.policy.language && canonicalizeLocale(runtimeFingerprint.language)) {
+                    parts.push(`language=${runtimeFingerprint.language}`);
                 }
                 console.log(`[Auto IP Base] ${profile.name || profileId}: ${resolved.cacheHit ? 'reused cache' : 'refreshed'} ip=${resolved.source.ip}${parts.length ? ` ${parts.join(' ')}` : ''}`);
             } catch (err) {
@@ -5315,6 +5803,9 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
                 const pid = activeProcesses[profileId].xrayPid;
                 const logFd = activeProcesses[profileId].logFd;
 
+                try { await earlyAttachSession?.detach(); } catch (e) { }
+                earlyAttachSessions.clear();
+
                 // 关闭日志文件描述符
                 if (logFd !== undefined) {
                     try {
@@ -5323,6 +5814,7 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
                 }
 
                 delete activeProcesses[profileId];
+                clearProfileRuntimeLanguageState(profileId);
                 await forceKill(pid);
 
                 // 性能优化：清理缓存文件，节省磁盘空间
@@ -5358,6 +5850,7 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
 
         launchingProfiles.delete(profileId);
         delete activeProcesses[profileId];
+        clearProfileRuntimeLanguageState(profileId);
         if (!sender.isDestroyed()) {
             sender.send('profile-status', { id: profileId, status: 'stopped' });
         }
