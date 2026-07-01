@@ -3862,12 +3862,20 @@ async function runProxyLatencyTest(proxyStr) {
         });
         xrayProcess.stdout.on('data', () => { });
 
-        const ready = await waitForLocalPortReady(tempPort, 1500);
+        // 先快速确认本地 SOCKS 端口已监听；若 Xray 立即崩溃则尽早退出。
+        const ready = await waitForLocalPortReady(tempPort, 2000);
         if (!ready || xrayProcess.exitCode !== null) {
             return { success: false, msg: `Xray crashed: ${xrayErr.substring(0, 150) || 'unknown'}` };
         }
 
-        const result = await measureSocksConnectLatency(tempPort, 4000);
+        // 复用启动环境时的预热+重试逻辑（fast→slow），避免多跳中转节点
+        // （CDN 前置 / 上游 SOCKS5 中转）因首次握手较慢导致单次探测超时而误判失败。
+        const result = await waitForProxyChainReady(tempPort, xrayProcess, {
+            fastReadyTimeoutMs: 3500,
+            fastProbeTimeoutMs: 3000,
+            slowReadyTimeoutMs: 9000,
+            slowProbeTimeoutMs: 6000
+        });
         if (!result.success && !result.xrayLog && xrayErr) {
             result.xrayLog = xrayErr.substring(0, 500);
         }
