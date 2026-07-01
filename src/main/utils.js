@@ -26,6 +26,16 @@ function getProxyRemark(link) {
     return '';
 }
 
+// 仅当链接显式要求跳过证书校验时才允许 allowInsecure。
+// Xray 26.3.x 已移除 allowInsecure 字段，硬编码 true 会导致内核加载配置失败、进程秒退，
+// 从而所有 TLS 节点测速与启动均失败。默认不输出该字段以保证兼容。
+function resolveAllowInsecure(source) {
+    if (!source) return false;
+    const read = (key) => (typeof source.get === 'function' ? source.get(key) : source[key]);
+    const truthy = (v) => v === true || v === 1 || v === '1' || v === 'true';
+    return truthy(read('allowInsecure')) || truthy(read('insecure')) || truthy(read('allowinsecure')) || truthy(read('skip-cert-verify'));
+}
+
 function parseProxyLink(link, tag) {
     let outbound = {
         tag: tag
@@ -58,12 +68,13 @@ function parseProxyLink(link, tag) {
             };
 
             if (vmess.tls === 'tls') {
-                outbound.streamSettings.tlsSettings = {
+                const vmessTls = {
                     serverName: vmess.sni || vmess.host,
                     fingerprint: "chrome",
-                    allowInsecure: true,
                     alpn: vmess.alpn ? vmess.alpn.split(',') : undefined
                 };
+                if (resolveAllowInsecure(vmess)) vmessTls.allowInsecure = true;
+                outbound.streamSettings.tlsSettings = vmessTls;
             }
         }
         else if (link.startsWith('vless://')) {
@@ -108,9 +119,9 @@ function parseProxyLink(link, tag) {
                 outbound.streamSettings.tlsSettings = {
                     serverName: params.get("sni") || params.get("host") || urlObj.hostname,
                     fingerprint: params.get("fp") || "chrome",
-                    allowInsecure: true,
                     alpn: params.get("alpn") ? params.get("alpn").split(',') : undefined
                 };
+                if (resolveAllowInsecure(params)) outbound.streamSettings.tlsSettings.allowInsecure = true;
             } else if (security === 'reality') {
                 outbound.streamSettings.realitySettings = {
                     show: false,
@@ -132,10 +143,11 @@ function parseProxyLink(link, tag) {
             outbound.streamSettings = {
                 network: type,
                 security: params.get("security") || "tls",
-                tlsSettings: { serverName: params.get("sni") || urlObj.hostname, fingerprint: "chrome", allowInsecure: true },
+                tlsSettings: { serverName: params.get("sni") || urlObj.hostname, fingerprint: "chrome" },
                 wsSettings: type === 'ws' ? { path: params.get("path"), headers: { Host: params.get("host") } } : undefined,
                 grpcSettings: type === 'grpc' ? { serviceName: params.get("serviceName") } : undefined
             };
+            if (resolveAllowInsecure(params)) outbound.streamSettings.tlsSettings.allowInsecure = true;
         }
         else if (link.startsWith('ss://')) {
             let raw = link.replace('ss://', '');
@@ -272,10 +284,12 @@ function parseProxyLink(link, tag) {
                             network: "tcp",
                             security: "tls",
                             tlsSettings: {
-                                serverName: obfsHost || host,
-                                allowInsecure: true
+                                serverName: obfsHost || host
                             }
                         };
+                        if (urlParams.get('allowInsecure') === '1' || urlParams.get('insecure') === '1') {
+                            outbound.streamSettings.tlsSettings.allowInsecure = true;
+                        }
                     }
                 }
             }
